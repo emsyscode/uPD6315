@@ -1,0 +1,830 @@
+//Note Please, this is a not clean code, this is only a pratical test
+//where we don't want use any library or dependence of other's code blocks!!!
+
+//The idea is let the base to you can change it and see wats appen during your changes!
+
+//set your clock speed
+#define F_CPU 16000000UL
+//these are the include files. They are outside the project folder
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+
+/* Port controls  (Platform dependent) */
+//#define CS_LOW()  PORTB &= ~1     /* CS=low */
+//#define CS_HIGH() PORTB |= 1      /* CS=high */
+
+//#define LCD_Port PORTB
+#define VFD_stb 7 // Must be pulsed to LCD fetch data of bus
+#define VFD_in 5// If 0 write LCD, if 1 read of LCD
+#define VFD_clk 6 // if 0 is a command, if 1 is a data0
+
+#define delay_tcsh _delay_us(16)
+#define AdjustPins    PORTB // before is C, but I'm use port C to VFC Controle signals
+
+/*****************************************************************************/
+
+/*Global Variables Declarations*/
+unsigned char day = 7;  // start at 7 because the VFD start the day on the left side and move to rigth... grid is reverse way
+unsigned char hours = 0;
+unsigned char minutes = 0;
+unsigned char seconds = 0;
+unsigned char milisec = 0;
+unsigned char points = 0;
+unsigned char SegLSB = 0;
+unsigned char SegMSB = 0;
+bool var = false;
+
+/*Decimal Digit (0-9) to Seven Segment Values Encoder*/
+unsigned char DigitTo7SegEncoder(unsigned char digit, unsigned char common);
+void send_clock_points(void);
+
+void setup() {
+  cli();
+  // put your setup code here, to run once:
+  pinMode( VFD_stb, OUTPUT);// Must be pulsed to LCD fetch data of bus
+  pinMode( VFD_in, OUTPUT);//  If 0 write LCD, if 1 read of LCD
+  pinMode( VFD_clk, OUTPUT);// if 0 is a command, if 1 is a data0
+  pinMode( 13, OUTPUT); //Pin of pinMode(LED_BUILTIN, OUTPUT);
+
+  pinMode(8, INPUT);
+  pinMode(9, INPUT);
+  pinMode(10, INPUT);
+  pinMode(11, INPUT);
+  
+  Serial.begin(115200);
+  unsigned char a, b;
+
+  seconds = 0x00;
+  minutes = 0x00;
+  hours = 0x00;
+/*
+  TCCR1B = (1 << CS12 | 1 << WGM12);
+  OCR1A = 32768 - 1; //32768-1;
+  TIMSK1 = 1 << OCIE1A;
+*/
+//set timer1 interrupt at 1Hz
+  TCCR1A = 0;// set entire TCCR1A register to 0
+  TCCR1B = 0;// same for TCCR1B
+  TCNT1  = 0;//initialize counter value to 0
+  // set compare match register for 1hz increments
+  OCR1A = 15624;// = (16*10^6) / (1*1024) - 1 (must be <65536)
+  // turn on CTC mode
+  TCCR1B |= (1 << WGM12);
+  // Set CS12 and CS10 bits for 1024 prescaler
+  TCCR1B |= (1 << CS12) | (1 << CS10);  
+  // enable timer compare interrupt
+  TIMSK1 |= (1 << OCIE1A);
+  
+  a = 0x33;
+  b = 0x01;
+  //You write a 1 to make a pin an output and a 0 to make it an input.
+  CLKPR = (0x80);
+  //Set PORT
+  DDRD = 0xFF;
+  PORTD = 0xFF;
+  pt6315_init();
+  clear();
+  
+  test_VFD();
+  delay_ms(1400);
+  
+  clear();
+  HiFolks();
+  //only here I active the enable to allow run the test of VFD
+  sei();
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  while(1){
+    //buttonAdjusts();
+  }
+}
+
+
+
+void buttonAdjusts(void){
+  /* Reset Seconds to 00*/
+  if ((AdjustPins & 0x01) == 0 ) {
+    _delay_ms(100);
+    seconds = 00;
+  }
+
+  /* Set Minutes when SegCntrl Pin 6 Switch is Pressed*/
+  if ((AdjustPins & 0x02) == 0 ) {
+    _delay_ms(100);
+    if (minutes < 59)
+      minutes++;
+  }
+  else {
+    minutes = 0;
+  }
+  /* Set Hours when SegCntrl Pin 7 Switch is Pressed*/
+  if ((AdjustPins & 0x04) == 0 ) {
+    _delay_ms(100);
+    if (hours < 23)
+      hours++;
+  }
+  else {
+    hours = 0;
+  }
+
+  /* Set Days when SegCntrl Pin 7 Switch is Pressed*/
+  if ((AdjustPins & 0x08) == 0 ) {
+    _delay_ms(100);
+    if (day < 7 )
+      day++;
+  }
+  else {
+    day = 1;
+  }
+}
+
+void delay_ms(uint16_t ms) {
+  //while loop that creates a delay for the duration of the millisecond countdown
+  while ( ms ){
+    _delay_ms(1);
+    ms--;
+  }
+}
+
+void __delay_ms(int x) {
+  int y = (x * 1000) / 12;
+  while (--y != 0)
+    continue;
+}
+
+void __delay_us(int x) {
+  int y = x / 12; // Note: x must be bigger at least 12
+  while (--y != 0)
+    continue;
+}
+
+void AD16315_send_cmd(unsigned char a) {
+  // This send use the strob... good for send commands, not burst of data.
+  unsigned char chr;
+  chr = a;
+
+  PORTD = (0 << VFD_clk);
+  delay_ms(1);//Delay
+  PORTD = (0 << VFD_in);
+  delay_ms(1);//Delay
+  PORTD = (0 << VFD_stb);
+  delay_ms(1);
+        for (int i = 0; i < 8; i++) // 8 bit 0-7 // aqui inverti para ficar com 0x88 correccto
+        {
+          PIND = (1 << VFD_in);
+          delay_ms(1);
+          PIND = (1 << VFD_clk); // O (^)XOR logo só muda se for diferente de "1 1" e "0 0"
+          delay_ms(1);
+          PIND = (0 << VFD_clk);
+          delay_ms(1);
+          PORTD = (0 << VFD_in);
+          delay_ms(1);
+        }
+  PORTD = (1 << VFD_stb) | (0 << VFD_clk) | (1 << VFD_in);
+  delay_ms(10);
+}
+
+void test(unsigned char a) {
+  for (int i = 0; i < 8; i++){ // 8 bit 0-7 // aqui inverti para ficar com 0x88 correccto
+    // I'm work with PIN to avoid use the PORT wich will let all bits with a impulse
+    PIND = (1 << VFD_in);
+    delay_ms(1);
+    PIND = (1 << VFD_clk); // XOR logo só muda se for diferente de "1 1" e "0 0"
+    delay_ms(1);
+    PIND = (0 << VFD_clk);
+    delay_ms(1);
+    PIND = (0 << VFD_in);
+    delay_ms(1);
+  }
+}
+
+void StringToHex(unsigned char* string, unsigned char* hexstring) {
+  unsigned char ch, i, j, len;
+
+  len = strlen(string);
+
+  for (i = 0, j = 0; i < len; i++, j += 2)
+  {
+    ch = string[i];
+
+    if ( ch >= 0 && ch <= 0x0F)
+    {
+      hexstring[j] = 0x30;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x10 && ch <= 0x1F)
+    {
+      hexstring[j] = 0x31;
+      ch -= 0x10;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x20 && ch <= 0x2F)
+    {
+      hexstring[j] = 0x32;
+      ch -= 0x20;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x30 && ch <= 0x3F)
+    {
+      hexstring[j] = 0x33;
+      ch -= 0x30;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x40 && ch <= 0x4F)
+    {
+      hexstring[j] = 0x34;
+      ch -= 0x40;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x50 && ch <= 0x5F)
+    {
+      hexstring[j] = 0x35;
+      ch -= 0x50;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x60 && ch <= 0x6F)
+    {
+      hexstring[j] = 0x36;
+      ch -= 0x60;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+    else  if ( ch >= 0x70 && ch <= 0x7F)
+    {
+      hexstring[j] = 0x37;
+      ch -= 0x70;
+
+      if (ch >= 0 && ch <= 9)
+        hexstring[j + 1] = 0x30 + ch;
+      else
+        hexstring[j + 1] = 0x37 + ch;
+    }
+  }
+  hexstring[j] = 0x00;
+}
+
+void send_data(unsigned char a) {
+  unsigned char data = 170; //value to transmit, binary 10101010
+  unsigned char mask = 1; //our bitmask
+  
+  data = a;
+  //This don't send the strobe signal, to be used in burst data send
+  for (mask = 00000001; mask > 0; mask <<= 1) { //iterate through bit mask
+    PIND = (0 << VFD_clk);
+    if (data & mask) { // if bitwise AND resolves to true
+      PORTD = (1 << VFD_in);
+    }
+    else { //if bitwise and resolves to false
+      PORTD = (0 << VFD_in); // send 0
+    }
+    _delay_us(48); //delay
+    PIND = (1 << VFD_clk);
+    _delay_us(48); //delay
+    PIND &= ~(0 << VFD_clk);
+    _delay_us(48); //delay
+  }
+}
+
+void send(unsigned char a) {
+  unsigned char data = 170; //value to transmit, binary 10101010
+  unsigned char mask = 1; //our bitmask
+
+  data = a;
+  PIND &= ~(1 << VFD_stb);
+  _delay_us(48);
+  for (mask = 00000001; mask > 0; mask <<= 1) { //iterate through bit mask
+    PIND = (0 << VFD_clk);
+    if (data & mask) { // if bitwise AND resolves to true
+      PORTD = (1 << VFD_in);
+    }
+    else { //if bitwise and resolves to false
+      PORTD = (0 << VFD_in); // send 0
+    }
+    _delay_us(48); //delay
+    PIND = (1 << VFD_clk);
+    _delay_us(48); //delay
+    PIND &= ~(0 << VFD_clk);
+    _delay_us(48); //delay
+  }
+  PIND = (1 << VFD_stb);
+  _delay_us(48);
+}
+
+void pt6315_init(void) {
+  delay_ms(200); //power_up delay
+
+  // Configure VFD display (grids)
+  send(0b00001000);//  (0b01000000)    cmd2 12 grids 16 segm
+  delay_tcsh; // 4/16 4 grids & 16 segments
+  // Write to memory display, increment address, normal operation
+  send(0b01000000);//(BIN(01000000)); //(BIN(01000000)));//  (0b01000000)
+  delay_tcsh;
+  // Address 00H - 15H ( total of 11*2Bytes=176 Bits)
+  send(0b11000000);//(BIN(01100110)); //(BIN(01100110)));
+  delay_tcsh;
+  // set DIMM/PWM to value
+  send((0b10001000) | 7);//0 min - 7 max  )(0b01010000)
+  delay_tcsh;
+}
+
+void clear(void) {
+  /*
+    Here I clean all registers
+    Could be done only on the number of grid
+    to be more fast. The 12 * 3 bytes = 36 registers
+  */
+  send(0b01000000); // cmd 2
+  PIND &= ~(1 << VFD_stb);
+  __delay_us(48);
+  send_data(0b11000000); //cmd 3
+
+  for (int i = 0; i < 36; i++) {
+    send_data(0b00000000); // data
+  }
+
+  PIND = (1 << VFD_stb);
+  __delay_us(48);
+}
+
+//**************ZONE Functions to write HI FOLKS***********************//
+void HiFolks(void){
+  for(int i=4; i> 0; i--){
+  writeCharH();
+  writeCharI();
+  writeCharSpace();
+  writeCharF();
+  writeCharO();
+  writeCharL();
+  writeCharK();
+  writeCharS();
+  delay_ms(1000);
+  clear();
+  }
+}
+//
+void writeCharH(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 6); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b11110000); // data
+    send_data(0b00011000); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharI(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 9); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b00000101); // data
+    send_data(0b00100010); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharSpace(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 0x0C); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b00000000); // data
+    send_data(0b00000000); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharF(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 0x0F); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b11010000); // data
+    send_data(0b00101000); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharO(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 0x12); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b00110001); // data
+    send_data(0b00111000); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharL(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 0x15); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b00010001); // data
+    send_data(0b00001000); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharK(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 0x18); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b10010010); // data
+    send_data(0b00001001); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+void writeCharS(void){
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | 0x1B); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(0b11100001); // data
+    send_data(0b00101000); // data
+    send_data(0b00000000); // data
+          
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(200);
+}
+//************END ZONE Functions to write HI FOLKS********************//
+
+void test_VFD(void) {
+  byte AA = 0x00;
+  byte AB = 0x00;
+  byte AC = 0x00;
+  unsigned long n = 0b100000000000000000000000;
+  
+  for (int i = 0; i < 36; i = i + 3) {  // 12 Grids * 3 bytes
+    for(int m = 0; m < 24; m++) {
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | i); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+   AA= (n & 0x000000ffUL) >>  0;
+   AB= (n & 0x0000ff00UL) >>  8;
+   AC= (n & 0x00ff0000UL) >> 16;
+         
+    send_data(AA); // data
+    send_data(AB); // data
+    send_data(AC); // data
+    
+        Serial.print(AC, HEX); Serial.print(", "); Serial.print(AB, HEX); Serial.print(", "); Serial.print(AA, HEX); Serial.print(", nº: "); Serial.println(m, HEX);
+      if (n >= 8388608; n >>= 1) { //iterate through bit mask  //(8388608) ( 16777216)
+      }
+      else{
+        n = 0b100000000000000000000000;// Length of 3 bytes (24 bit)
+        delay(200);
+        clear();
+      }
+
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 Segments
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+    delay(500);
+    }
+  }
+}
+
+void send_digit(unsigned char value7seg) {
+  /*
+    Here do a test for all segments of 6 grids
+    each grid is controlled by a group of 3 bytes
+    by these reason I'm send a burst of 3 bytes of
+    data. The cycle for do a increment of 3 bytes on
+    the variable "i" on each test cycle of FOR.
+  */
+  for (int i = 0; i < 36; i = i + 3) {
+    //send(0b00000010); // cmd 1
+    send(0b01000000); // cmd 2
+    PIND &= ~(1 << VFD_stb);
+    __delay_us(48);
+    send_data((0b11000000) | i); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+    send_data(value7seg); // data
+
+    PIND = (1 << VFD_stb);
+    __delay_us(48);
+
+    send(0b00001000); // cmd1 Here I define the 8 grids and 20 seg
+    send((0b10001000) | 7); //cmd 4
+    __delay_us(48);
+  }
+}
+
+void send_clock_digits( unsigned char gridNumber) {
+  //send(0b00000010); // cmd 1
+  send(0b01000000); // cmd 2
+  PIND &= ~(1 << VFD_stb);
+  _delay_us(48);
+  send_data((0b11000000) | gridNumber); //cmd 3 Each grid use 3 bytes here define the 1º, 2º, 3º until max address
+
+  send_data(SegLSB); // data
+  send_data(SegMSB); // data
+
+  PIND = (1 << VFD_stb);
+  _delay_us(48);
+  send(0b00001000); // cmd1 Here I define the 8 grids and 20seg
+  send((0b10001000) | 7); //cmd 4
+  _delay_us(48);
+}
+
+unsigned char DigitTo7SegEncoder( unsigned char digit, unsigned char common) {
+  /*
+  common - Common Anode (0), Common Cathode(1)
+  SegLSB - Encoded Seven Segment Value
+
+  Connections:
+  return value to 7 segments digits (a,b,c,d,e,f,g and point case use it)
+  significant bit A is (bit 0) and G is bit 6, point bit 7.
+
+  remember I if use a vfd tube with the segment of meaddle broke in tow segments...MSB is also used
+*/
+  switch (digit) {
+    case 0: if (common == 1) {
+        SegLSB = 0b00110001;
+        SegMSB = 0b00111000;
+      }
+      break;
+    case 1: if (common == 1) {
+        SegLSB = 0b00100000;
+        SegMSB = 0b00010000;
+      }
+      break;
+    case 2: if (common == 1) {
+        SegLSB = 0b11010001;
+        SegMSB = 0b00110000;
+      }
+      break;
+    case 3: if (common == 1) {
+        SegLSB = 0b11100001;
+        SegMSB = 0b00110000;
+      }
+      else      SegLSB = ~0b01001111;
+      break;
+    case 4: if (common == 1) {
+        SegLSB = 0b11100000;
+        SegMSB = 0b00011000;
+      }
+      break;
+    case 5: if (common == 1) {
+        SegLSB = 0b11100001;
+        SegMSB = 0b00101000;
+      }
+      break;
+    case 6: if (common == 1) {
+        SegLSB = 0b11110001;
+        SegMSB = 0b00101000;
+      }
+      break;
+    case 7: if (common == 1) {
+        SegLSB = 0b00100000;
+        SegMSB = 0b00110000;
+      }
+      break;
+    case 8: if (common == 1) {
+        SegLSB = 0b11110001;
+        SegMSB = 0b00111000;
+      }
+      break;
+    case 9: if (common == 1) {
+        SegLSB = 0b11100001;
+        SegMSB = 0b00111000;
+      }
+      break;
+  }
+}
+
+void actSSMMHH(void){
+ seconds++;
+ send_update_clock();
+
+  if (seconds >= 59) {
+    seconds = 0;
+    minutes++;
+  }
+  if (minutes >= 59) {
+    minutes = 0;
+    hours++;
+  }
+  if (hours >= 23) {
+    hours = 0;
+    day--;
+    if (day <= 0 )
+      day = 7;
+  } 
+}
+
+void send_update_clock() {
+  unsigned char Digit;
+  unsigned char number, DisplayCommonPin;
+  unsigned char Grid;
+  number = 0x07;
+  DisplayCommonPin = 1;
+
+  
+  /*
+    //*****Only necessary if you want send miliseconds ********
+    //SegPins = DigitTo7SegEncoder(milisec%10,1);
+    Grid = 0x00;
+    send_clock_digits(0b00000000 , Grid);
+    //SegPins = DigitTo7SegEncoder(milisec/10,1);
+    Grid = 0x03;
+    send_clock_digits(0b00000000, Grid);
+  */
+
+
+  //********** Only to update day of week ******/
+  /*
+    Grid = 0x00;
+    if (day==1) // tuhsday
+    {
+    send_clock_digits((0x00 | 0b10000000), Grid);
+    }
+    else
+    {
+    send_clock_digits((0x00 | 0b00000000), Grid);
+    }
+    Grid = 0x03;
+    if (day==2) // tuhsday
+    {
+    send_clock_digits((0x00 | 0b10000000), Grid);
+    }
+    else
+    {
+    send_clock_digits((0x00 | 0b00000000), Grid);
+    }
+    //********************************************/
+
+  DigitTo7SegEncoder(seconds % 10, 1);
+  Grid = 0x21;
+  if (day == 9) // thusday not valid day to skip it
+  {
+    send_clock_digits( Grid);  // grid small, without day segment
+    send_clock_digits( Grid);  // grid small, without day segment
+  }
+  else{
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+
+  DigitTo7SegEncoder(seconds / 10, 1);
+  Grid = 0x1E;
+  if (day == 3) // wethsday
+  {
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  else{
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  //*************************************************************
+  DigitTo7SegEncoder(minutes % 10, 1);
+  Grid = 0x15;
+  if (day == 4) // tuhsday
+  {
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  else{
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+
+  DigitTo7SegEncoder(minutes / 10, 1);
+  Grid = 0x12;
+  if (day == 5) // monday
+  {
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  else{
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  //**************************************************************
+  DigitTo7SegEncoder(hours % 10, 1);
+  Grid = 0x09;
+  if (day == 6) // sunday
+  {
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  else{
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+
+  DigitTo7SegEncoder(hours / 10, 1);
+  Grid = 0x06;
+  if (day == 7) // sunday
+  {
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  else{
+    send_clock_digits( Grid);
+    send_clock_digits( Grid);
+  }
+  //**************************************************************
+}
+
+ISR(TIMER1_COMPA_vect) {  //Interrupt Trigger
+  var = digitalRead(13);
+  digitalWrite(13, !var);
+  actSSMMHH();
+}
